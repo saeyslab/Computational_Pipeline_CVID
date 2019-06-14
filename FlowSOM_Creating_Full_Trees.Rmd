@@ -1,0 +1,439 @@
+---
+title: "FlowSOM_CVID"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+  
+---
+
+
+
+## Set working directory for entire Rmd
+```{r setup}
+knitr::opts_knit$set(root.dir = "../")
+```
+
+## Loading in packages
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+
+suppressPackageStartupMessages(library(flowCore))
+suppressPackageStartupMessages(library(flowWorkspace))
+suppressPackageStartupMessages(library(FlowSOM))
+suppressPackageStartupMessages(library(MEM))
+source("R_Scripts/FlowSOM_functions.R")
+seed <- 1
+
+```
+
+## On what tube will you be working on? 
+
+```{r}
+tube <- 5
+
+if (tube == 1){
+  # PBMCs
+  markers_to_cluster_idc <- c(1,4,7:16,18)
+} else if (tube == 2) {
+  # B cells
+  markers_to_cluster_idc <- c(7:13,16,18)
+} else if (tube == 5) {
+  
+# T cells
+  markers_to_cluster_idc <- c(7:13,16,18)
+} 
+```
+
+
+## Do you include the other PID?
+```{r}
+HC_CVID <- c("HC", "CVID")
+PID_HC <- c(HC_CVID, "IgG_deficiency", "IgG_subclass_deficiency", "IgM_deficiency",
+            "IgA_deficiency")
+
+group_to_use <- PID_HC  # Choose between HC_CVID and PID_HC
+PID <- "_PID_New_preprocessing" #Set to empty character if you are only working with HC en CVID (otherwise: _PID)
+```
+
+
+## List correct direcories
+```{r}
+data_dir = paste0("FlowSOM/Tube",tube,"/Data",PID)
+fcs_dir = paste0("Preprocessing/Tube",tube)
+figure_dir <- paste0("FlowSOM/Tube",tube,"/Figures", PID)
+```
+
+# Make directories if they don't exist yet
+```{r}
+suppressWarnings(dir.create(data_dir))
+suppressWarnings(dir.create(figure_dir))
+```
+
+
+# FlowSOM analysis Human blood samples CVID
+
+## Overview of the meta_data
+
+```{r}
+meta_data_file <- "../../PhD/CVID/Clinical_features_data.txt"
+meta_data <- read.delim(meta_data_file, header = TRUE, sep = "\t", 
+                        check.names = FALSE) %>% 
+  dplyr::filter(diagnosis_group %in% group_to_use) %>%
+  dplyr::filter(SAMPLE_ID != "PIDHC081")
+
+if(length(group_to_use) == length(PID_HC)){
+  meta_data$diagnosis_group <- as.character(meta_data$diagnosis_group)
+  meta_data[!(meta_data$diagnosis_group %in% HC_CVID),"diagnosis_group"] <- "PID"
+  meta_data$diagnosis_group <- as.factor(meta_data$diagnosis_group)
+}
+
+# PIDHC081 is removed because he has too few cells for tube 2
+rownames(meta_data) <- meta_data$SAMPLE_ID
+
+meta_data
+```
+
+## List files and select only HC and CVID files and/or other PID files
+
+```{r}
+allfiles <- list.files(fcs_dir, pattern = "^P.*_pp.fcs$", recursive = TRUE)
+files <- allfiles[grep(paste(rownames(meta_data), collapse="|"), allfiles)]
+```
+
+## Make an aggregate file for all HC and CVID patients and/or other PID patiens 
+# Included quality check
+
+```{r}
+
+set.seed(seed)
+suppressWarnings(ff_agg <- AggregateFlowFrames(file.path(fcs_dir,files), 
+                              cTotal = 3000000,
+                              writeOutput  = TRUE,
+                              outputFile = file.path(data_dir,
+                                                     paste0("aggregate",PID,
+                                                            seed,".fcs"))))
+table(ff_agg@exprs[,"File"])
+
+markers <- ff_agg@parameters@data[,"desc"]
+markers[is.na(markers)] <- ff_agg@parameters@data[,"name"][is.na(markers)]
+markers <- gsub("#.*", "", markers)
+names(markers) <- colnames(ff_agg)
+  
+# Define the markers you want to use to identify the cellTypes
+# Markers after the start gate
+markers_to_cluster <-  colnames(ff_agg)[markers_to_cluster_idc]
+# Define the markers you want to plot
+markers_to_plot <- colnames(ff_agg)[markers_to_cluster_idc]
+
+# Quality Control: all files should behave similarly as we will use them
+# aggregated together. High populations should be at approximately the same MFI!
+# We check this for all the markers we might be interested in at some point.
+
+PlotMarkerMFI(files = files,
+              markers_to_plot = markers_to_plot,
+              marker_names = markers,
+              ff = ff_agg,
+              figure_dir = figure_dir)
+  
+
+```
+
+
+## Set number of meta-clusters and clusters for the different panels
+```{r}
+if(tube == 1){
+  nclus <- 10
+  nmetaclus <- 14
+} else if(tube == 2){
+  nclus <- 10
+  nmetaclus <- 18
+} else if(tube == 5){
+  nclus <- 10
+  nmetaclus <- 18
+} 
+```
+
+
+## Make the FlowSOM object
+```{r}
+ff <- read.FCS(file.path(data_dir, paste0("aggregate",PID, seed,".fcs")))
+ff_agg <- ff
+ff <- ff[,-c(20,21)]
+
+markers <- ff@parameters@data[,"desc"]
+markers[is.na(markers)] <- ff@parameters@data[,"name"][is.na(markers)]
+markers <- gsub("#.*", "", markers)
+
+names(markers) <- colnames(ff)
+
+
+markers
+
+fsom <- FlowSOM(ff,
+                colsToUse = markers_to_cluster_idc,
+                xdim = nclus, ydim = nclus,
+                nClus = nmetaclus,
+                seed = seed)
+
+saveRDS(fsom,
+     file = file.path(data_dir,
+                      paste0("FlowSOM",
+                             PID, "_",
+                             nclus, "_", 
+                             nmetaclus, "_",
+                             seed,".RDS")))
+
+```
+
+# Plot FlowSOM tree with labeling of clusters and meta-clusters
+```{r}
+library(RColorBrewer)
+
+fsom <- readRDS( file = file.path(data_dir, 
+                                  paste0("FlowSOM",
+                                         PID, "_",
+                                         nclus, "_", 
+                                         nmetaclus, "_",
+                                         seed,".RDS")))
+
+set.seed(seed)
+
+fsom$FlowSOM$prettyColnames <- sub(" .*", "", fsom$FlowSOM$prettyColnames)
+
+
+pdf(file.path(figure_dir,
+              paste0("FlowSOM", PID, "_",
+                             nclus, "_", 
+                             nmetaclus, "_",
+                             seed,"_stars.pdf")),
+    useDingbats = FALSE)
+PlotStars(UpdateNodeSize(fsom$FlowSOM,maxNodeSize = 10, reset = TRUE),
+          backgroundValues = fsom$metaclustering, backgroundColor =  colorRampPalette(brewer.pal(12, "Set3"))(nmetaclus))
+PlotNumbers(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset=TRUE))
+PlotLabels(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset = TRUE), labels = fsom$metaclustering)
+dev.off()
+```
+
+
+# Adapted plotting with different scaling (see FlowSOM_functions.R)
+```{r}
+library(RColorBrewer)
+
+
+fsom <- readRDS( file = file.path(data_dir, 
+                                  paste0("FlowSOM",
+                                         PID, "_",
+                                         nclus, "_", 
+                                         nmetaclus, "_",
+                                         seed,".RDS")))
+
+fsom_original <- fsom
+fsom <- UpdateNodeSize(fsom$FlowSOM,maxNodeSize = 10, reset = TRUE)
+
+set.seed(seed)
+fsom$FlowSOM$prettyColnames <- sub(" .*", "", fsom$FlowSOM$prettyColnames)
+
+
+PlotStars_adapted(UpdateNodeSize(fsom$FlowSOM,maxNodeSize = 10, reset = TRUE),
+          backgroundValues = fsom$metaclustering, backgroundColor =  colorRampPalette(brewer.pal(12, "Set3"))(nmetaclus), scaling = "MaxValue")
+PlotNumbers(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset=TRUE))
+PlotLabels(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset = TRUE), labels = fsom$metaclustering)
+
+
+```
+
+# Map all files on full tree to calculate purity and to plot the manual labels on the tree
+```{r}
+fsom <- readRDS( file = file.path(data_dir, 
+                                  paste0("FlowSOM",
+                                         PID, "_",
+                                         nclus, "_", 
+                                         nmetaclus, "_",
+                                         seed,".RDS")))
+
+
+pdf(file.path(figure_dir,
+              paste0("FlowSOM", PID, "_",
+                             nclus, "_", 
+                             nmetaclus, "_",
+                             seed,"_individual_files.pdf")),
+    useDingbats = FALSE)
+
+PlotStars(UpdateNodeSize(fsom$FlowSOM,maxNodeSize = 10, reset = TRUE),
+          backgroundValues = fsom$metaclustering)
+
+
+manual_gated_cells <- c()
+metacluster_cells <- c()
+cluster_cells <- c()
+
+patient <- meta_data$SAMPLE_ID[80]
+
+
+for(patient in meta_data$SAMPLE_ID){
+  resting_samples <- (length(meta_data$SAMPLE_ID) - which(meta_data$SAMPLE_ID == patient)) + 1
+  print(paste0("Nog ", resting_samples, " files te berekenen."))
+    file <- grep(patient, files,value = TRUE)
+  if (length(file) > 1){
+    file <- file[length(file)]
+  }
+  if (length(file) == 0){
+    next
+  }
+  ff <- read.FCS(file.path(fcs_dir,file))
+  # Load the corresponding manual gating
+  load(file.path(fcs_dir,
+                 gsub("_pp.fcs","_manual.Rdata",file)))
+  
+  # Map the new file to the flowSOM structure computed before
+  fsom_tmp <- NewData(fsom$FlowSOM,ff)
+  
+  if(tube == 5){
+    manual$manual <- factor(manual$manual,levels(manual$manual)[c(13,1:12)])
+  }
+  
+  PlotStars(fsom_tmp, 
+            main=patient)
+  PlotPies(UpdateNodeSize(fsom_tmp,reset = TRUE, maxNodeSize = 10),
+            cellTypes = manual$manual, 
+           main=patient)
+
+  manual_gated_cells <- c(manual_gated_cells, as.character(manual$manual))
+  cluster_cells <- c(cluster_cells, GetClusters(fsom_tmp))
+  metacluster_cells <- c(metacluster_cells, GetMetaclusters(fsom_tmp, fsom$metaclustering))
+  
+  
+      
+  }
+dev.off()
+
+purity_clusters <- Purity(manual_gated_cells, cluster_cells, weighted = F)
+purity_metaclusters <- Purity(manual_gated_cells, metacluster_cells, weighted = F)
+
+purity_clusters
+purity_metaclusters
+FMeasure(manual_gated_cells, metacluster_cells)
+
+
+
+```
+
+
+# Plot the 2d plots for the different populations to see how well the metaclusters predict the populations
+```{r}
+
+ff <- read.FCS(file.path(fcs_dir, files[71]))
+#flowSOM.res <- FlowSOM(ff, colsToUse = markers_to_cluster_idc, nClus = nmetaclus, xdim = 10, ydim = 10 )
+
+fsom <- readRDS( file = file.path(data_dir, 
+                                  paste0("FlowSOM",
+                                         PID, "_",
+                                         nclus, "_", 
+                                         nmetaclus, "_",
+                                         seed,".RDS")))
+
+pdf(paste0(figure_dir,"/Markeroverview_origTree.pdf"),
+    width =  14, height = 10, useDingbats = FALSE)
+
+fsom$FlowSOM$prettyColnames <- sub(" .*", "", fsom$FlowSOM$prettyColnames)
+
+
+PlotStars_adapted(UpdateNodeSize(fsom$FlowSOM,maxNodeSize = 10, reset = TRUE),
+          backgroundValues = fsom$metaclustering, backgroundColor = colorRampPalette(brewer.pal(12, "Set3"))(nmetaclus), scaling = "MaxValue")
+PlotNumbers(UpdateNodeSize(fsom$FlowSOM,reset=TRUE, maxNodeSize = 10))
+PlotLabels(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset = TRUE), labels = fsom$metaclustering)
+
+if (tube == 2){
+  PlotStars_adapted(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset = TRUE),
+            markers = get_channels(ff, c("IgA", "IgD", "IgM","IgG")), 
+            backgroundValues = fsom$metaclustering, backgroundColor =  colorRampPalette(brewer.pal(12, "Set3"))(nmetaclus),  scaling = "MaxValue")
+  PlotStars_adapted(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset = TRUE),
+            markers = get_channels(ff, c("CD38", "CD138", "CD21", "CD24", "CD27")),  backgroundValues = fsom$metaclustering, backgroundColor =  colorRampPalette(brewer.pal(12, "Set3"))(nmetaclus), scaling = "MaxValue")
+}
+
+set.seed(1)
+subset <- sample(seq_len(nrow(fsom$FlowSOM$data)),
+                 100000)
+subset <- FlowSOMSubset(fsom$FlowSOM, subset)
+
+for(i in seq(1, nmetaclus, by = 3)){
+
+  
+  if (tube == 1){
+    
+    marker_list <- list(c("PE-CF594", "SSC-A"),
+                        c("APC", "AF700"),
+                        c("PerCP-Cy5-5", "FITC"),
+                        c("PE-Cy7", "PerCP-Cy5-5"),
+                        c("Pacific Blue", "PE"),
+                        c("PE", "PE-Cy5"))
+    
+  } else if (tube == 2){
+  
+    marker_list <- list(c("PE-Cy7", "PE-CF594"),
+                        c("PE-Cy7", "PerCP-Cy5-5"),
+                        c("PE-Cy5", "BV605"),
+                        c("APC", "PE"),
+                        c("FITC", "BV605"))
+  } else if (tube == 3){
+      marker_list <- list(c( "Pacific Blue-A", "APC-A"),
+                          c("FITC", "FSC-A"),
+                          c("APC-Cy7", "FSC-A"),
+                          c("Qdot 605", "FSC-A"))
+  }
+  else if (tube == 5){
+      marker_list <- list(c("Pe-Cy7", "AF700"),
+                          c("Pacific Blue", "FITC"),
+                          c("PE-Cy5", "PE"),
+                          c("PE-Cy5", "PE-CF594"),
+                          c("PE-Cy5","V605"),
+                          c("PE", "PerCP-Cy5-5"))
+    }
+  
+  PlotOverview2D(list(FlowSOM = subset, metaclustering = fsom$metaclustering),
+                 marker_list,
+                 metaclusters = c(i:(i+2)),
+                 ff = ff)
+}
+
+dev.off()
+
+
+
+```
+
+
+# Make densityplots per metacluster (See density_functionplot.R)
+```{r}
+pdf(paste0(figure_dir,"/Densityoverview_OnePatient.pdf"),
+    width =  14, height = 10)
+
+source("R_Scripts/density_functionplot.R")
+
+  ff <- read.FCS(file.path(fcs_dir, files[71]))
+  fsom_tmp <- NewData(fsom$FlowSOM,ff)
+
+
+for (i in c(1,8)){
+suppressWarnings(PlotClusters1D(list(FlowSOM = fsom_tmp, metaclustering = fsom$metaclustering ), markerlist = names(fsom$FlowSOM$prettyColnames)[markers_to_cluster_idc], metaclusters = c(i:(i+6)), textsize = 5))
+}
+dev.off()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
