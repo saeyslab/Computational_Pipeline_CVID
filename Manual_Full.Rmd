@@ -1,0 +1,727 @@
+---
+title: "Manual_Full_analysis"
+output: html_document
+---
+
+
+## This document is to do an analaysis on a full Manual model in order to find relevant features to make tSNE plots and to inspect most important features
+
+
+## Set working directory for entire Rmd
+```{r setup}
+knitr::opts_knit$set(root.dir = "../")
+```
+
+
+
+# Load packages and meta-data (selection of patients with CVID, other PADs and HCs)
+# Select correct tube (panel)
+```{r}
+
+library(tidyverse)
+library(randomForest)
+library(readxl)
+library(e1071)
+library(qsub)
+library(ggplot2)
+# ------------------------- reading in tube files -----------------------------
+
+allfiles <- list.files("../../PhD/CVID/Excelsheets_data_verwerking", 
+                       pattern = ".*_all_data" ,recursive = TRUE, 
+                       full.names = TRUE)
+
+# ---------------------------- Class to use -----------------------------------
+
+HC_CVID <- c("HC", "CVID")
+PID_HC <- c(HC_CVID, "IgG_deficiency", "IgG_subclass_deficiency", "IgM_deficiency",
+            "IgA_deficiency")
+
+group_to_use <- PID_HC  # Choose between HC_CVID and PID_HC
+PID <- "_PID" #Set to empty character if you are only working with HC en CVID (otherwise: _PID)
+
+seed <- 1
+
+
+# --------------------------- Read meta-data ----------------------------------
+
+meta_data_file <- "../../PhD/CVID/Clinical_features_data.txt"
+meta_data <- read.delim(meta_data_file, header = TRUE, sep = "\t", 
+                        check.names = FALSE) %>% 
+  dplyr::filter(diagnosis_group %in% group_to_use) %>%
+  dplyr::filter(SAMPLE_ID != "PIDHC081")
+
+if(length(group_to_use) == length(PID_HC)){
+  meta_data$diagnosis_group <- as.character(meta_data$diagnosis_group)
+  meta_data[!(meta_data$diagnosis_group %in% HC_CVID),"diagnosis_group"] <- "PAD"
+  meta_data$diagnosis_group <- as.factor(meta_data$diagnosis_group)
+}
+
+# PIDHC081 is removed because he has too few cells for tube 2
+rownames(meta_data) <- meta_data$SAMPLE_ID
+
+
+
+# ------------------------- read in correct matrix ----------------------------
+
+
+## Tube is 1 (PBMCs), 2 (B cell subsets) or 5 (T cell subsets) or 1_5 (Combination of all tubes)
+
+tube <- "1_5"
+
+if (tube != "1_5"){
+  giant_matrix <- readRDS(file = paste0("Manual_gating/Data/tube",tube,".rds"))
+  cols_not_to_convert <- c(1,2,3)
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+} else {
+  giant_matrix <- readRDS(file = "Manual_gating/Data/tube1til5.rds")
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+  cols_not_to_convert <- c(1,2,3)
+}
+
+
+
+```
+
+
+# Random FOrest - NOFS
+
+```{r}
+FS <- "NoFS"
+tube <- "1_5"
+
+
+
+for (tube in c(1,2,5, "1_5")){
+
+
+if (tube != "1_5"){
+  giant_matrix <- readRDS(file = paste0("Manual_gating/Data/tube",tube,".rds"))
+  cols_not_to_convert <- c(1,2,3)
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+} else {
+  giant_matrix <- readRDS(file = "Manual_gating/Data/tube1til5.rds")
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+  cols_not_to_convert <- c(1,2,3)
+}
+
+# Leave out next patients because they are missing tube 3  values
+giant_matrix <- giant_matrix %>% 
+  filter(!(`SAMPLE ID` %in% c("PID057", "PID217", "PIDHC089")))
+
+
+giant_matrix$Diagnosis_2 <- as.character(giant_matrix$Diagnosis)
+
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "PAD")] <- "No_CVID"
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "HC")] <- "No_CVID"
+
+giant_matrix$Diagnosis_2 <- as.factor(giant_matrix$Diagnosis_2)
+
+giant_matrix <- giant_matrix %>% select(Diagnosis_2, everything())
+
+cols_not_to_convert <- c(1,2,3,4)
+
+
+meta_data <- meta_data %>% filter(`SAMPLE_ID` %in% giant_matrix$`SAMPLE ID`)
+set.seed(seed)
+
+source("R_Scripts/Z_score.R")
+
+  set.seed(1)
+  
+  train_data <- giant_matrix
+  
+  
+  z_scored_train_data_full <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                                         cols_not_to_convert,
+                                                         meta_data, 
+                                                         verbose = FALSE, 
+                                                         start = 5, 
+                                                         stop = dim(train_data)[2]))
+  z_scored_train_data <- z_scored_train_data_full$z_score_matrix
+  
+  
+  # For the three variables
+  res3 <- randomForest(x = z_scored_train_data[,-c(1:4)], 
+                       y = z_scored_train_data$Diagnosis)
+  
+  
+  # For the two variables
+  res2 <- randomForest(x = z_scored_train_data[,-c(1:4)], 
+                       y = as.factor(z_scored_train_data$Diagnosis_2))
+  
+  feat_imp_df_2 <- importance(res2) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+    
+    # plot dataframe
+    p_2 <- ggplot(feat_imp_df_2, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (2 classes), Manual features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+    feat_imp_df_3 <- importance(res3) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+    
+    # plot dataframe
+    p_3 <- ggplot(feat_imp_df_3, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (3 classes), Manual features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+    ggsave(
+  paste0("Manual_gating/NoFS_2classes_noFStube",tube,".png"),
+  plot = p_2,
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+    
+        ggsave(
+  paste0("Manual_gating/NoFS_3classes_noFStube",tube,".png"),
+  plot = p_3,
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+    
+    plot(p_2)
+    plot(p_3)
+  
+
+    
+saveRDS(res2, file = paste0("Manual_gating/NoFS_res2_tube",tube, ".rds")) 
+saveRDS(res3, file = paste0("Manual_gating/No_FS_res3_tube",tube, ".rds"))
+
+}    
+    
+```
+
+
+# SVM - NOFS
+
+```{r}  
+  
+FS <- "NoFS"
+tube <- "1_5"
+
+
+
+for (tube in c(1,2,5, "1_5")){
+
+
+if (tube != "1_5"){
+  giant_matrix <- readRDS(file = paste0("Manual_gating/Data/tube",tube,".rds"))
+  cols_not_to_convert <- c(1,2,3)
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+} else {
+  giant_matrix <- readRDS(file = "Manual_gating/Data/tube1til5.rds")
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+  cols_not_to_convert <- c(1,2,3)
+}
+
+
+
+# Leave out next patients because they are missing tube 3  values
+giant_matrix <- giant_matrix %>% 
+  filter(!(`SAMPLE ID` %in% c("PID057", "PID217", "PIDHC089")))
+
+
+giant_matrix$Diagnosis_2 <- as.character(giant_matrix$Diagnosis)
+
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "PAD")] <- "No_CVID"
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "HC")] <- "No_CVID"
+
+giant_matrix$Diagnosis_2 <- as.factor(giant_matrix$Diagnosis_2)
+
+giant_matrix <- giant_matrix %>% select(Diagnosis_2, everything())
+
+cols_not_to_convert <- c(1,2,3,4)
+
+
+meta_data <- meta_data %>% filter(`SAMPLE_ID` %in% giant_matrix$`SAMPLE ID`)
+set.seed(seed)
+
+
+source("R_Scripts/Z_score.R")
+set.seed(1)
+  
+  train_data <- giant_matrix 
+  
+  
+  z_scored_train_data_full <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                                         cols_not_to_convert,
+                                                         meta_data, 
+                                                         verbose = FALSE, 
+                                                         start = 5, 
+                                                         stop = dim(train_data)[2]))
+  z_scored_train_data <- z_scored_train_data_full$z_score_matrix
+  
+  
+  
+  # For the three classes
+  res3 <- svm(Diagnosis ~ ., data = z_scored_train_data[,-c(1,3,4)], kernel = "linear", cost =1, scale = TRUE)
+  
+  
+  # For the two classes
+  res2 <- svm(Diagnosis_2 ~ ., data = z_scored_train_data[,-c(2,3,4)], kernel = "linear", cost =1, scale = TRUE)
+  
+  
+  results_2 <- t(res3$coefs) %*% res3$SV 
+  results_2 <- apply(abs(results_3), 2, sum)
+  
+  resultslist_3 <- results_3 %>% abs %>% sort %>% tail(., 3)
+ 
+  
+  results_3 <- t(res3$coefs) %*% res3$SV 
+  results_3 <- apply(abs(results_3), 2, sum)
+  
+  resultslist_3 <- results_3 %>% abs %>% sort %>% tail(., 3)
+ 
+  saveRDS(results_2, file = paste0("Manual_gating/NoFS_SVM_res2_tube",tube, ".rds")) 
+  saveRDS(results_3, file = paste0("Manual_gating/NoFS_SVM_res3_tube",tube, ".rds"))
+ 
+} 
+  
+
+```
+
+# Random FOrest - WithFS
+```{r}
+
+FS <- "WithFS"
+
+for (tube in c(1,2,5, "1_5")){
+
+
+if (tube != "1_5"){
+  giant_matrix <- readRDS(file = paste0("Manual_gating/Data/tube",tube,".rds"))
+  cols_not_to_convert <- c(1,2,3)
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+} else {
+  giant_matrix <- readRDS(file = "Manual_gating/Data/tube1til5.rds")
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+  cols_not_to_convert <- c(1,2,3)
+}
+# Leave out next patients because they are missing tube 3  values
+giant_matrix <- giant_matrix %>% 
+  filter(!(`SAMPLE ID` %in% c("PID057", "PID217", "PIDHC089")))
+
+
+
+giant_matrix$Diagnosis_2 <- as.character(giant_matrix$Diagnosis)
+
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "PAD")] <- "No_CVID"
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "HC")] <- "No_CVID"
+
+giant_matrix$Diagnosis_2 <- as.factor(giant_matrix$Diagnosis_2)
+
+giant_matrix <- giant_matrix %>% select(Diagnosis_2, everything())
+
+cols_not_to_convert <- c(1,2,3,4)
+
+
+meta_data <- meta_data %>% filter(`SAMPLE_ID` %in% giant_matrix$`SAMPLE ID`)
+set.seed(seed)
+
+selected_featureslist_2 <- list()
+selected_featureslist_3 <- list()
+
+source("R_Scripts/Z_score.R")
+
+  set.seed(1)
+  
+  train_data <- giant_matrix
+  
+  
+  z_scored_train_data_full <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                                         cols_not_to_convert,
+                                                         meta_data, 
+                                                         verbose = FALSE, 
+                                                         start = 5, 
+                                                         stop = dim(train_data)[2]))
+  z_scored_train_data <- z_scored_train_data_full$z_score_matrix
+  
+  
+  handle_3 <- qsub_lapply(
+    X = c(5:(dim(z_scored_train_data)[2])),
+    qsub_config = override_qsub_config(
+      name = "Kruskal_Wallis_test", 
+      verbose = F,
+      wait = T,
+      memory = "4G"
+    ),
+    qsub_environment = c("z_scored_train_data"),
+    FUN = function(x){
+      set.seed(1)
+      library(tidyverse)
+      
+      train_data_new <-  z_scored_train_data %>% select(x,'Diagnosis')
+      test <- kruskal.test(rownames(z_scored_train_data[x]) ~ Diagnosis, data = train_data_new )
+      
+      p_value <- test$p.value
+      names(p_value) <- colnames(z_scored_train_data)[x]
+      return(p_value)
+    } )
+  
+  # For the three classes
+  na_removed_3 <- unlist(handle_3[!is.na(handle_3)])
+  adj_p_3 <- stats::p.adjust(na_removed_3, "BH")
+  sorted_3 <- sort(adj_p_3)
+  z_scored_train_data <- z_scored_train_data %>% select("SAMPLE ID",  "Diagnosis", "Diagnosis_2", names(sorted_3))
+  selected_features_3 <- c(4,5)
+  for(i_3 in 6:length(sorted_3)){
+    max_3 <- 0
+    for(f_3 in selected_features_3){
+      if(sd(z_scored_train_data %>% .[[f_3]]) > 0 & sd(z_scored_train_data %>% .[[i_3]]) >0 ){
+        tmp_3 <- abs(cor(z_scored_train_data %>% .[[i_3]],z_scored_train_data %>% .[[f_3]]))
+        if(tmp_3 > max_3) max_3 <- tmp_3
+      } else {
+        max_3 <- 1
+      }
+    }
+    if(max_3 < 0.2){
+      selected_features_3 <- c(selected_features_3,i_3)
+      print(selected_features_3)
+    } 
+  }
+  
+  
+  selected_featureslist_3 <- colnames(z_scored_train_data)[selected_features_3]
+  
+  selected_train_data_3 <- z_scored_train_data %>% select("SAMPLE ID", "Diagnosis", "Diagnosis_2", selected_featureslist_3)
+
+  
+  
+
+  res3 <- randomForest(x = selected_train_data_3[,-c(1:4)], 
+                       y = selected_train_data_3$Diagnosis)
+  
+  
+  # For the two classes
+  handle_2 <- qsub_lapply(
+    X = c(5:dim(z_scored_train_data)[2]),
+    qsub_config = override_qsub_config(
+      name = "Wilcox_test", 
+      verbose = F,
+      wait = T,
+      memory = "4G"
+    ),
+    qsub_environment = c("z_scored_train_data"),
+    FUN = function(x){
+      set.seed(1)
+      library(tidyverse)
+      test <- wilcox.test(z_scored_train_data %>% filter(Diagnosis_2 == "CVID") %>% 
+                            .[[x]],
+                          z_scored_train_data %>% filter(Diagnosis_2 == "No_CVID") %>% 
+                            .[[x]])
+      p_value <- test$p.value
+      names(p_value) <- colnames(z_scored_train_data)[x]
+      return(p_value)
+    } )
+  
+  na_removed_2 <- unlist(handle_2[!is.na(handle_2)])
+  na_removed_2 <- na.omit(na_removed_2)
+  adj_p_2 <- stats::p.adjust(na_removed_2, "BH")
+  sorted_2 <- sort(adj_p_2)
+  z_scored_train_data <- z_scored_train_data %>% select("SAMPLE ID", "Diagnosis", "Diagnosis_2", names(sorted_2))
+  selected_features_2 <- c(4,5)
+  for(i_2 in 6:length(sorted_2)){
+    max_2 <- 0
+    for(f_2 in selected_features_2){
+      if(sd(z_scored_train_data %>% .[[f_2]]) > 0 & sd(z_scored_train_data %>% .[[i_2]]) >0 ){
+        tmp_2 <- abs(cor(z_scored_train_data %>% .[[i_2]],z_scored_train_data %>% .[[f_2]]))
+        if(tmp_2 > max_2) max_2 <- tmp_2
+      } else {
+        max_2 <- 1
+      }
+    }
+    if(max_2 < 0.2){
+      selected_features_2 <- c(selected_features_2,i_2)
+      print(selected_features_2)
+    } 
+  }
+  
+  selected_featureslist_2 <- colnames(z_scored_train_data)[selected_features_2]
+  
+  selected_train_data_2 <- z_scored_train_data %>% select("SAMPLE ID", "Diagnosis", "Diagnosis_2", selected_featureslist_2)
+  
+  
+  # For the two variables
+  res2 <- randomForest(x = selected_train_data_2[,-c(1:4)], 
+                       y = as.factor(selected_train_data_2$Diagnosis_2))
+  
+  
+    feat_imp_df_2 <- importance(res2) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+    
+    # plot dataframe
+    p_2 <- ggplot(feat_imp_df_2, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (2 classes), Manual features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+    feat_imp_df_3 <- importance(res3) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+    
+    # plot dataframe
+    p_3 <- ggplot(feat_imp_df_3, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (3 classes), Manual features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+    ggsave(
+  paste0("Manual_gating/WithFS_2classes_noFStube",tube,".png"),
+  plot = p_2,
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+    
+        ggsave(
+  paste0("Manual_gating/WithFS_3classes_noFStube",tube,".png"),
+  plot = p_3,
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+    
+    plot(p_2)
+    plot(p_3)
+  
+
+
+saveRDS(selected_featureslist_2, file = paste0("Manual_gating/WithFS_selected_features_res2_tube",tube, ".rds")) 
+saveRDS(selected_featureslist_3, file = paste0("Manual_gating/WithFS_selected_features_res3_tube",tube, ".rds"))
+    
+saveRDS(res2, file = paste0("Manual_gating/WithFS_res2_tube",tube, ".rds")) 
+saveRDS(res3, file = paste0("Manual_gating/WithFS_res3_tube",tube, ".rds"))
+
+}
+  
+
+```
+
+
+# SVM with FS
+```{r}
+
+
+
+FS <- "WithFS"
+
+for (tube in c(1,2,5, "1_5")){
+
+
+if (tube != "1_5"){
+  giant_matrix <- readRDS(file = paste0("Manual_gating/Data/tube",tube,".rds"))
+  cols_not_to_convert <- c(1,2,3)
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+} else {
+  giant_matrix <- readRDS(file = "Manual_gating/Data/tube1til5.rds")
+  giant_matrix[,-c(1,2,3)] <- apply(giant_matrix[,-c(1,2,3)], 2, type.convert)
+  cols_not_to_convert <- c(1,2,3)
+}
+
+# Leave out next patients because they are missing tube 3  values
+giant_matrix <- giant_matrix %>% 
+  filter(!(`SAMPLE ID` %in% c("PID057", "PID217", "PIDHC089")))
+
+
+logFile = paste0("Manual_gating/LogFiles/log_file_for_manual_gating_tube",tube,
+                 "_WihFS_SVM.txt")
+cat(paste0("This is a log file for the patients that were predicted wrong from the RF without a certain experiment day"), file=logFile, append=FALSE, sep = "\n")
+
+
+giant_matrix$Diagnosis_2 <- as.character(giant_matrix$Diagnosis)
+
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "PAD")] <- "No_CVID"
+giant_matrix$Diagnosis_2[which(giant_matrix$Diagnosis == "HC")] <- "No_CVID"
+
+giant_matrix$Diagnosis_2 <- as.factor(giant_matrix$Diagnosis_2)
+
+giant_matrix <- giant_matrix %>% select(Diagnosis_2, everything())
+
+cols_not_to_convert <- c(1,2,3,4)
+
+
+meta_data <- meta_data %>% filter(`SAMPLE_ID` %in% giant_matrix$`SAMPLE ID`)
+set.seed(seed)
+
+source("R_Scripts/Z_score.R")
+
+  set.seed(1)
+  
+  #print(paste0("Experiment day ", experiment))
+  train_data <- giant_matrix
+  
+  
+  z_scored_train_data_full <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                                         cols_not_to_convert,
+                                                         meta_data, 
+                                                         verbose = FALSE, 
+                                                         start = 5, 
+                                                         stop = dim(train_data)[2]))
+  z_scored_train_data <- z_scored_train_data_full$z_score_matrix
+  
+  selected_features_list_2 <-  readRDS(file = paste0("Manual_gating/WithFS_selected_features_res2_tube",tube, ".rds")) 
+  selected_featurenames_2 <- selected_featureslist_2[[(experiment-12)]]
+  
+    selected_features_list_3 <-  readRDS(file = paste0("Manual_gating/WithFS_selected_features_res3_tube",tube, ".rds"))
+  selected_featurenames_3 <- selected_featureslist_3[[(experiment-12)]]
+  
+  selected_train_data_2 <- z_scored_train_data %>% select( "Diagnosis_2", "Diagnosis",  "SAMPLE ID", "EXPERIMENT NAME", selected_featurenames_2)
+  
+  selected_train_data_3 <- z_scored_train_data %>% select("Diagnosis_2", "Diagnosis",  "SAMPLE ID", "EXPERIMENT NAME", selected_featurenames_3)
+
+  
+  
+  # For the three classes
+  res3 <- svm(Diagnosis ~ ., data = selected_train_data_3[,-c(1,3,4)], kernel = "linear", cost =1, scale = TRUE)
+
+  # For the two classes
+  res2 <- svm(Diagnosis_2 ~ ., data = selected_train_data_2[,-c(2,3,4)], kernel = "linear", cost =1, scale = TRUE)
+  
+  results_3 <- t(res3$coefs) %*% res3$SV 
+  results_3 <- apply(abs(results_3), 2, sum)
+  
+  resultslist_3 <- results_3 %>% abs %>% sort %>% tail(., 3)
+  
+  saveRDS(results_2, file = paste0("Manual_gating/NoFS_SVM_res2_tube",tube, ".rds")) 
+  saveRDS(results_3, file = paste0("Manual_gating/NoFS_SVM_res3_tube",tube, ".rds"))
+ 
+  
+}  
+
+```
+
+# Make tsne plots
+```{r}
+
+set.seed(seed)
+
+library(Rtsne)
+library(gridExtra)
+source("R_Scripts/Z_score.R")
+
+
+meta_data_file <- "../../PhD/CVID/Clinical_features_data.txt"
+meta_data <- read.delim(meta_data_file, header = TRUE, sep = "\t", 
+                        check.names = FALSE) %>% 
+  dplyr::filter(diagnosis_group %in% group_to_use) %>%
+  dplyr::filter(SAMPLE_ID != "PIDHC081")
+
+if(length(group_to_use) == length(PID_HC)){
+  meta_data$diagnosis_group <- as.character(meta_data$diagnosis_group)
+  meta_data[!(meta_data$diagnosis_group %in% HC_CVID),"diagnosis_group"] <- "PAD"
+  meta_data$diagnosis_group <- as.factor(meta_data$diagnosis_group)
+}
+
+# PIDHC081 is removed because he has too few cells for tube 2
+rownames(meta_data) <- meta_data$SAMPLE_ID
+meta_data <- meta_data %>% mutate("diagnosis_group_2" = ifelse(meta_data$diagnosis_group == "CVID", "CVID", "No_CVID") )
+
+annotation <- meta_data
+
+
+cols_not_to_convert <- c(1:3)
+  
+  z_scored_train_data_full <- suppressWarnings(UseZScore(to_be_scored = giant_matrix, 
+                                                         cols_not_to_convert,
+                                                         meta_data, 
+                                                         verbose = FALSE, 
+                                                         start = 4, 
+                                                         stop = ncol(giant_matrix)))
+  z_scored_train_data <- z_scored_train_data_full$z_score_matrix
+  
+
+
+## Features were obtained from SVM model of the three panels seperately without FS  
+  
+z_scored_train_data <- z_scored_train_data %>% select("SAMPLE ID", "Diagnosis", "EXPERIMENT NAME", "B cells (% lymphos)", "HLADR relative MFI (B cells)", "CD4+ T cells (% lymphos)", "IgG-IgA+ (% sw mem B cells)", "CD138+ plasma cells (% alive)", "IgD-CD27- B cells (% B cells)", "RO-CCR7+ (% CD8+ T cells)                          naive", "CXCR5 / CCR7 relative MFI (B cells) ratio", "naive CD8/ total memory CD8 ratio")
+  
+
+
+  
+  tsne_res <- Rtsne(z_scored_train_data[,-c(1:3)], perplexity = 15)
+
+annotation <- annotation %>% 
+  mutate(tsne_1 = tsne_res$Y[,1]) %>% 
+  mutate(tsne_2 = tsne_res$Y[,2])
+
+p <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(size = 5) +
+  theme_minimal() + 
+  ggtitle("A. TSNE based on Manual features")
+
+p_gender <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = gender), size = 5) + guides(colour = guide_legend( title = "Gender")) +
+  theme_minimal() + 
+  ggtitle("B.")
+
+  
+p_diagnosis <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = diagnosis_group), size = 5) +  guides(colour = guide_legend( title = "Diagnosis")) +
+  theme_minimal() + 
+  ggtitle("C.")
+
+
+p_age <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = as.numeric(gsub(",", ".", gsub("\\.", "", age_y)))), size = 5) +guides(color=guide_legend(title="Age"))
+p_age <- p_age +  theme_minimal()  +
+  ggtitle("D.")
+
+ 
+l <- list(p,p_gender, p_diagnosis, p_age)
+
+ggsave("Manual_gating/tsne_new2.png", arrangeGrob(grobs = l), width = 10, height = 10, dpi = 300)
+
+plot(p_age)
+
+
+
+
+p_diagnosis <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = diagnosis_group), size = 5) +  guides(colour = guide_legend( title = "Diagnosis")) +
+  theme_minimal() + geom_text(aes(label=SAMPLE_ID),hjust=0, vjust=2)
+
+
+p_diagnosis
+
+```
+
