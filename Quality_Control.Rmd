@@ -1,0 +1,212 @@
+---
+title: "New_quality_control"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Set working directory for entire Rmd
+```{r setup}
+knitr::opts_knit$set(root.dir = "../")
+```
+
+
+## Load libraries and script for quality control functions
+```{r}
+library(flowCore) # For basic flow cytometry functionality
+library(flowWorkspace) # For loading FlowJo X workspaces
+library(FlowSOM) # For making FlowSOM visualisations
+library(flowAI)
+library(tidyverse)
+library(pheatmap)
+library(RColorBrewer)
+library(FlowSOMworkshop)
+
+options("scipen"=100)
+
+source("R_Scripts/Quality_control_functions.R")
+```
+
+
+## Initialise the experiment days that have to be analysed
+```{r}
+# Give experiment days
+start <- 13
+end <- 33
+i <- 30
+
+tube <- 5
+
+if (tube ==1){ #PBMCs
+  cell_types <- c("B cells", "CD4+ T cells", "CD4- T cells", "Monocytes", "basophils", "ILCs", "NK cells", "NKT cells", "DCs", "cDCs", "pDCs")
+  start_gate <- c("alive")
+  } else if (tube ==2){ #B cells
+    cell_types <- c("marginal zone", "naive", "sw memory", "IgD-CD27-", "CD138+ plasma cells", "CD38+ plasmablasts", "CD21low B cells", "CD21-CD38+ B cells", "CD24++CD38++ Tr B cells" )
+  start_gate <- c("B cells", "CD38+ plasmablasts")
+  } else if (tube == 5){ #T cells
+    cell_types <- c( "CD4+ T/Q1: CD45RO#PE-Cy5- , CCR7#PE+", "CD4+ T/Q2: CD45RO#PE-Cy5+ , CCR7#PE+" , "CD4+ T/Q3: CD45RO#PE-Cy5+ , CCR7#PE-",  "CD4+ T/Q4: CD45RO#PE-Cy5- , CCR7#PE-", "CD31+RO-CD4+", "CD8+ T/Q1: CD45RO#PE-Cy5- , CCR7#PE+",  "CD8+ T/Q2: CD45RO#PE-Cy5+ , CCR7#PE+", "CD8+ T/Q3: CD45RO#PE-Cy5+ , CCR7#PE-", "CD8+ T/Q4: CD45RO#PE-Cy5- , CCR7#PE-", "CD31+RO-CD8+", "gd T cells", "Treg")
+    start_gate <- c("T cells")
+  }
+```
+
+# Preprocessing and quality control of the data
+```{r}
+
+i <- 14
+
+# Initialising the different directories 
+#dir <- "/media/sf_Fedora_General_Folder/PhD/CVID/CVID_Delfien_orig"
+dir <- "/Fedora_General_Folder/PhD/CVID/CVID_Delfien_orig"
+dataDir <- paste0("Preprocessing/Tube",tube)
+suppressWarnings(dir.create(dataDir))
+
+
+for (i in start:end){
+  
+  print(paste0("Working on experiment ", i))
+ 
+
+  fcsDirs <- file.path(dir,paste0("Experiment CVID_",i))
+  if (tube != 3){ daysDirs <- 
+    list.files(fcsDirs, pattern = "^CVID_...D1.*[0-9]$")} else {
+      daysDirs <- list.files(fcsDirs, pattern = "^CVID_...D3.*[0-9]$")
+    }
+  fcsDir <- file.path(fcsDirs, daysDirs)
+  
+
+
+  if (tube %in% c(1,2,6)){
+  files <- list.files(file.path(fcsDir, "Tube 1-2-6"), pattern = paste0("^P.*Tube ",tube), ignore.case = TRUE)
+  if (length(files) ==0) {files <- 
+    list.files(file.path(fcsDir, "CVID plate 1-2-6"), pattern = paste0("^P.*Tube ",tube), ignore.case = TRUE)}
+  } else if (tube == 5){
+     files <- list.files(file.path(fcsDir, "Tube 5"),pattern = paste0("^P.*Tube ",tube), ignore.case = TRUE)
+  if (length(files) ==0) {files <- 
+    list.files(file.path(fcsDir, "CVID plate 5"), pattern = paste0("^P.*Tube ",tube), ignore.case = TRUE)}
+  }
+  
+  # Workspace file
+  wsp_file <- file.path(dir, paste0("Experiment CVID_",i,"/Exp CVID_",i," tube ",tube,".wsp"))
+  # Create some directories:
+  #       To save the QC figures
+  #       To save the preprocessed fcs files
+  #       To save the FlowSOM results
+  
+  qcDir <- file.path(dataDir, paste0("Exp_",i,"/QC"))
+  filesDir <- file.path(dataDir, paste0("Exp_",i))
+  
+  suppressWarnings(dir.create(file.path(dataDir, paste0("Exp_",i))))
+  suppressWarnings(dir.create(qcDir))
+  
+  ###################
+  ## Preprocessing ##
+  ###################
+  
+  
+  tubes <- parse_flowjo_compensation(files, 
+                                     wsp_file, 
+                                     fcsDir, 
+                                     tube, 
+                                     experiment = i, 
+                                     plot = FALSE, 
+                                     html_plot = html_plot) # set HTML_plot to "_QC" or FALSE
+  
+  if (tube == 2){
+    gating_matrix <- tubes$gates
+    saveRDS(gating_matrix, file = paste0("Preprocessing/Tube2/Gatingmatrix_exp",i,".Rds"))
+  }
+  
+  data_live <- gating_subset_adapted(tubes, start_gate)
+  #plot_aggregate(flowset = data_live$flowSet, output_image = paste0("Preprocessing/Tube",tube,"/Exp_",i,"/QC/aggregate",i,".png"))
+  
+  item <- 1
+  for (item in 1:length(data_live$flowSet)) { 
+    
+    
+    print(paste0("Saving file ", data_live$flowSet[[item]]@description$GUID))
+    suppressWarnings( write.FCS(data_live$flowSet[[item]],
+              file = file.path(filesDir,
+                               gsub(".fcs","_pp.fcs",data_live$flowSet[[item]]@description$GUID))))
+    
+    if (tube == 3){
+      manual_labels <- manual_vector_tube3(data_live$gates[[item]])
+     
+    } else {manual_labels <- manual_vector(data_live$gates[[item]], cell_types)}
+    
+    manual <- list("matrix" = data_live$gates[[item]],
+                   "manual" = manual_labels)
+    
+    save(manual,
+         file = file.path(filesDir,
+                          gsub(".fcs","_manual.Rdata",data_live$flowSet[[item]]@description$GUID)))
+  }
+}
+
+```
+
+
+# make factor vector of manual labels if an error occured in building FlowSOM models
+```{r}
+
+files <- list.files(file.path(filesDir), pattern = ".*.Rdata", recursive = TRUE, full.names = TRUE)
+file <- files[1]
+
+
+
+
+
+for (file in files){
+  load(file)
+ new_manual_labels <- as.character(manual$manual)
+ test <- sub("(.*)#.*([+-] .*)#.*([+-])", "\\1\\2\\3", new_manual_labels)
+  
+  
+  manual_labels <- as.factor(test)
+  manual$manual <- manual_labels
+  
+  save(manual, file = file)
+  
+  
+}
+
+```
+
+
+## Make an overview figure of FlowAI quality control
+# Make sure that there are no duplicate rowfiles in qcmini.txt
+```{r}
+tube <- 5
+start <- 13
+end <- 33
+
+breaksList =  seq(0, 100, by = 1)
+
+i <- 13
+
+pdf(file = paste0("Preprocessing/Tube",tube,"/QC_overview.pdf"))
+
+for (i in start:end){
+  print(i)
+  qc_mini <- paste0("Preprocessing/Tube",tube,"/Exp_",i,"/QC/QCmini.txt")
+  pctg <- read.delim(qc_mini, check.names = FALSE) %>% 
+    column_to_rownames("Name file") %>% 
+    select(matches('%|n. of events'))
+  
+
+
+annotation <- data.frame(nCells = pctg$`n. of events`, row.names = rownames(pctg))
+  pheatmap(pctg[,-1],
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           main = paste0("Experiment ", i), 
+           breaks = breaksList,
+           color= colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+           annotation_row = annotation,
+           annotation_colors = list(nCells= c("white", "purple"))
+  )
+}
+
+dev.off()
+```
+
+
