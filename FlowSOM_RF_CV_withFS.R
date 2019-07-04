@@ -274,7 +274,7 @@ for (to_use_data in all){
       sorted_2 <- sort(adj_p_2)
       z_scored_train_data <- z_scored_train_data %>% select("SAMPLE ID", "diagnosis", "diagnosis_2", names(sorted_2))
       selected_features_2 <- c(4,5)
-      for(i_2 in (6:length(sorted_2))-2){
+      for(i_2 in (6:length(sorted_2))){
         max_2 <- 0
         for(f_2 in selected_features_2){
           if(sd(z_scored_train_data %>% .[[f_2]]) > 0 & sd(z_scored_train_data %>% .[[i_2]]) >0 ){
@@ -367,7 +367,7 @@ for (to_use_data in all){
     sorted_3 <- sort(adj_p_3)
     z_scored_train_data <- z_scored_train_data %>% select("SAMPLE ID", "diagnosis", "diagnosis_2", names(sorted_3))
     selected_features_3 <- c(4,5)
-    for(i_3 in (6:length(sorted_3))-2){
+    for(i_3 in (6:length(sorted_3))){
       max_3 <- 0
       for(f_3 in selected_features_3){
         if(sd(z_scored_train_data %>% .[[f_3]]) > 0 & sd(z_scored_train_data %>% .[[i_3]]) >0 ){
