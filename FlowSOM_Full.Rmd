@@ -1,0 +1,774 @@
+---
+title: "FlowSOM_Full_analysis"
+output: html_document
+---
+
+## Set working directory for entire Rmd
+```{r setup}
+knitr::opts_knit$set(root.dir = "../")
+```
+
+
+# Load in packages and meta-data
+```{r}
+
+library(tidyverse)
+library(randomForest)
+library(readxl)
+library(e1071)
+library(qsub)
+library(Rtsne)
+library(ggplot2)
+
+
+source("R_Scripts/Z_score.R")
+# ------------------------- reading in tube files -----------------------------
+
+allfiles <- list.files("../../PhD/CVID/Excelsheets_data_verwerking", 
+                       pattern = ".*_all_data" ,recursive = TRUE, 
+                       full.names = TRUE)
+
+# ---------------------------- Class to use -----------------------------------
+
+HC_CVID <- c("HC", "CVID")
+PID_HC <- c(HC_CVID, "IgG_deficiency", "IgG_subclass_deficiency", "IgM_deficiency",
+            "IgA_deficiency")
+
+group_to_use <- PID_HC  # Choose between HC_CVID and PID_HC
+PID <- "_PID_New_preprocessing" #Set to empty character if you are only working with HC en CVID (otherwise: _PID)
+
+seed <- 1
+
+
+# --------------------------- Read meta-data ----------------------------------
+
+meta_data_file <- "../../PhD/CVID/Clinical_features_data.txt"
+meta_data <- read.delim(meta_data_file, header = TRUE, sep = "\t", 
+                        check.names = FALSE) %>% 
+  dplyr::filter(diagnosis_group %in% group_to_use) %>%
+  dplyr::filter(SAMPLE_ID != "PIDHC081")
+
+if(length(group_to_use) == length(PID_HC)){
+  meta_data$diagnosis_group <- as.character(meta_data$diagnosis_group)
+  meta_data[!(meta_data$diagnosis_group %in% HC_CVID),"diagnosis_group"] <- "PAD"
+  meta_data$diagnosis_group <- as.factor(meta_data$diagnosis_group)
+}
+
+# PIDHC081 is removed because he has too few cells for tube 2
+rownames(meta_data) <- meta_data$SAMPLE_ID
+
+
+
+# ------------------------- read in correct matrix ----------------------------
+#Tube 1 (PBMCs), Tube 2 (B cells) or tube 5 (T cells) or 1_2_5 (Combination of tubes)
+
+tube <- "5"
+
+``` 
+
+
+# Make correct featureset
+```{r}
+all <- c("meta_clusters", "clusters", "percentages_clusters", "percentages_metaclusters","total", "percentages_to")
+to_use_data <- all[5]
+
+matrices_directory <- paste0("FlowSOM/Tube", tube, "/Data", PID) 
+
+choose_correct_data <- function(to_use_data, matrices_directory){
+ if (to_use_data == "meta_clusters"){
+      percentages_metaclusters <- readRDS(file.path(matrices_directory, paste0("percentages_metaclusters.RDS")))
+      MFI_metaclusters <- readRDS(file.path(matrices_directory, paste0("MFI_metaclusters.RDS")))
+      
+      combined_data <- cbind("SAMPLE ID" = rownames(percentages_metaclusters), 
+                             percentages_metaclusters, 
+                             MFI_metaclusters) %>% 
+        tbl_df %>% 
+        arrange(`SAMPLE ID`)
+    } else if (to_use_data == "clusters"){
+      percentages_clusters <- readRDS(file.path(matrices_directory, paste0("percentages_clusters.RDS")))
+      MFI_clusters <- readRDS(file.path(matrices_directory, paste0("MFI_clusters.RDS")))
+      
+      combined_data <- cbind("SAMPLE ID" = rownames(percentages_clusters), 
+                             percentages_clusters, 
+                             MFI_clusters) %>% 
+        tbl_df %>% 
+        arrange(`SAMPLE ID`)
+    } else if (to_use_data == "total"){
+      percentages_metaclusters <- readRDS(file.path(matrices_directory, paste0("percentages_metaclusters.RDS")))
+      MFI_metaclusters <- readRDS(file.path(matrices_directory, paste0("MFI_metaclusters.RDS")))
+      percentages_clusters <- readRDS(file.path(matrices_directory, paste0("percentages_clusters.RDS")))
+      MFI_clusters <- readRDS(file.path(matrices_directory, paste0("MFI_clusters.RDS")))
+      percentages_to_clusters_metaclusters <- readRDS(file.path(matrices_directory, paste0("percentages_to_clusters_metaclusters.RDS")))
+      
+      colnames(percentages_clusters) <- paste(colnames(percentages_clusters), "c", sep = "_")
+      colnames(percentages_metaclusters) <- paste(colnames(percentages_metaclusters), "m", sep = "_")
+      colnames(MFI_clusters) <- paste(colnames(MFI_clusters), "c", sep = "_")
+      colnames(MFI_metaclusters) <- paste(colnames(MFI_metaclusters), "m", sep = "_")
+      colnames(percentages_to_clusters_metaclusters) <- paste(colnames(percentages_to_clusters_metaclusters), "c_to_mc", sep = "_")
+      
+      
+      
+      combined_data <- cbind("SAMPLE ID" = rownames(percentages_clusters), 
+                             percentages_clusters, 
+                             MFI_clusters,
+                             percentages_metaclusters,
+                             MFI_metaclusters,
+                             percentages_to_clusters_metaclusters) %>% 
+        tbl_df %>% 
+        arrange(`SAMPLE ID`)
+    } else if (to_use_data == "percentages_clusters"){
+      percentages_clusters <- readRDS(file.path(matrices_directory, paste0("percentages_clusters.RDS")))
+      combined_data <- cbind("SAMPLE ID" = rownames(percentages_clusters), 
+                             percentages_clusters) %>% 
+        tbl_df %>% 
+        arrange(`SAMPLE ID`)
+    } else if (to_use_data == "percentages_metaclusters"){
+      percentages_metaclusters <- readRDS(file.path(matrices_directory, paste0("percentages_metaclusters.RDS")))
+      combined_data <- cbind("SAMPLE ID" = rownames(percentages_metaclusters), 
+                             percentages_metaclusters) %>% 
+        tbl_df %>% 
+        arrange(`SAMPLE ID`)
+    } else if (to_use_data == "percentages_to"){
+      percentages_to_clusters_metaclusters <- readRDS(file.path(matrices_directory, paste0("percentages_to_clusters_metaclusters.RDS")))
+      
+      combined_data <- cbind("SAMPLE ID" = rownames(percentages_to_clusters_metaclusters), 
+                             percentages_to_clusters_metaclusters) %>% 
+        tbl_df %>% 
+        arrange(`SAMPLE ID`)
+    } 
+    
+    combined_data <- combined_data %>% dplyr::filter(`SAMPLE ID` %in% meta_data$SAMPLE_ID)
+    
+    combined_data[,-1] <- apply(combined_data[,-1], 2, type.convert)
+    
+    suppressWarnings(meta_data <- meta_data %>% 
+      dplyr::filter(`SAMPLE_ID` %in% 
+                      combined_data$`SAMPLE ID`) %>% 
+      arrange(`SAMPLE_ID`))
+    
+    
+    combined_data <- combined_data %>% 
+      .[!duplicated(.[,"SAMPLE ID"]),] %>%  
+      mutate("diagnosis" = meta_data$diagnosis_group) 
+    
+    combined_data <- combined_data %>% mutate("diagnosis_2" = ifelse(combined_data$diagnosis == "CVID", "CVID", "No_CVID"))
+   
+    return(combined_data)
+}
+
+```
+
+
+
+# Random Forest - NOFS
+
+```{r}
+FS <- "NoFS"
+
+tube <- "5"
+
+for (tube in c(1,2, 5 , "1_2_5")){
+
+set.seed(seed)
+
+source("R_Scripts/Z_score.R")
+
+  set.seed(1)
+  
+  
+  all <- c("meta_clusters", "clusters", "percentages_clusters", "percentages_metaclusters","total", "percentages_to")
+to_use_data <- all[5]
+
+
+
+matrices_directory <- paste0("FlowSOM/Tube", tube, "/Data", PID) 
+
+for (to_use_data in all){
+  
+   train_data <- choose_correct_data(to_use_data, matrices_directory)
+   dimension <- train_data %>% colnames %>% length
+    
+    train <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                        cols_not_to_convert = c(1,dimension -1, dimension), 
+                                        meta_data = meta_data, 
+                                        verbose = TRUE,
+                                        start = 2,
+                                        stop = dimension-2))
+   
+      z_scored_train_data <- train$z_score_matrix
+
+  # For the three variables
+  res3 <- randomForest(x = z_scored_train_data[,-c(1:3)], 
+                        y = z_scored_train_data$diagnosis)
+    
+  
+  # For the two variables
+   res2 <- randomForest(x = z_scored_train_data[,-c(1:3)], 
+                          y = as.factor(z_scored_train_data$diagnosis_2))
+   
+   
+    
+   
+  feat_imp_df_2 <- importance(res2) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+    
+    # plot dataframe
+    p_2 <- ggplot(feat_imp_df_2, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (2 classes), FlowSOM features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+    feat_imp_df_3 <- importance(res3) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+          
+    
+    
+      ggsave(
+  paste0(matrices_directory,"/NoFS_2classes_",to_use_data,"_tube",tube, ".png"),
+  plot = p_2,
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+    # plot dataframe
+    p_3 <- ggplot(feat_imp_df_3, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (3 classes), FlowSOM features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+            ggsave(
+  paste0(matrices_directory,"/NoFS_3classes_",to_use_data,"_tube",tube,".png"),
+  plot = p_3,
+  width = 10,
+  height = 10,
+  dpi = 300
+)
+ 
+            saveRDS(res2, file = paste0(matrices_directory,"/NoFS_res2_",to_use_data,"_tube",tube,".rds")) 
+            saveRDS(res3, file = paste0(matrices_directory,"/NoFS_res3",to_use_data,"_tube",tube,".rds"))
+}
+}
+```
+
+
+# SVM - NOFS
+
+```{r}  
+  
+FS <- "NoFS"
+
+
+tube <- "5"
+
+for (tube in c(1,2, 5 , "1_2_5")){
+
+set.seed(seed)
+
+source("R_Scripts/Z_score.R")
+
+  set.seed(1)
+  
+  
+  all <- c("meta_clusters", "clusters", "percentages_clusters", "percentages_metaclusters","total", "percentages_to")
+to_use_data <- all[5]
+
+
+
+matrices_directory <- paste0("FlowSOM/Tube", tube, "/Data", PID) 
+
+for (to_use_data in all){
+  
+   train_data <- choose_correct_data(to_use_data, matrices_directory)
+   dimension <- train_data %>% colnames %>% length
+    
+    train <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                        cols_not_to_convert = c(1,dimension -1, dimension), 
+                                        meta_data = meta_data, 
+                                        verbose = TRUE,
+                                        start = 2,
+                                        stop = dimension-2))
+   
+      z_scored_train_data <- train$z_score_matrix
+
+      
+      z_scored_train_data$diagnosis_2 <- as.factor(z_scored_train_data$diagnosis_2)
+      
+# For the three variables
+  res3 <- svm(diagnosis ~ ., data = z_scored_train_data[,-c(1,3)], kernel = "linear", cost =1, scale = TRUE)
+
+  # For the two variables
+  res2 <- svm(diagnosis_2 ~ ., data = z_scored_train_data[,-c(1,2)], kernel = "linear", cost =1, scale = TRUE)
+   
+  
+  results_2 <- t(res2$coefs) %*% res2$SV 
+  
+  resultslist_2 <- as.numeric(results_2[1,])
+  names(resultslist_2) <- colnames(results_2)
+  resultslist_2 <- resultslist_2 %>% abs %>% sort %>% tail(., 3)
+  
+
+  results_3 <- t(res3$coefs) %*% res3$SV 
+  results_3 <- apply(abs(results_3), 2, sum)
+  
+  resultslist_3 <- results_3 %>% abs %>% sort %>% tail(., 3)
+  
+    saveRDS(res2, file = paste0(matrices_directory,"/NoFS_resSVM2_",to_use_data,"_tube",tube,".rds")) 
+            saveRDS(res3, file = paste0(matrices_directory,"/NoFSSVM_res3",to_use_data,"_tube",tube,".rds"))
+
+   
+} 
+}
+```
+
+
+```{r}
+
+FS <- "WithFS"
+
+tube <- "1"
+
+for (tube in c(1,2, 5, "1_2_5")){
+
+set.seed(seed)
+
+source("R_Scripts/Z_score.R")
+
+  set.seed(1)
+  
+  
+  all <- c("meta_clusters", "clusters", "percentages_clusters", "percentages_metaclusters","total", "percentages_to")
+to_use_data <- all[5]
+
+
+
+matrices_directory <- paste0("FlowSOM/Tube", tube, "/Data", PID) 
+
+for (to_use_data in all){
+  
+selected_featureslist_2 <- list()
+selected_featureslist_3 <- list()
+   train_data <- choose_correct_data(to_use_data, matrices_directory)
+   dimension <- train_data %>% colnames %>% length
+    
+    train <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                        cols_not_to_convert = c(1,dimension -1, dimension), 
+                                        meta_data = meta_data, 
+                                        verbose = TRUE,
+                                        start = 2,
+                                        stop = dimension-2))
+   
+      z_scored_train_data <- train$z_score_matrix
+
+      z_scored_train_data$diagnosis_2
+      
+ # For the three classes
+
+ p_values_3 <- c()
+  for (x in c(4:ncol(z_scored_train_data))){
+    print(x)
+    
+    train_data_new <-  z_scored_train_data %>% select(x,'diagnosis')
+    colnames(train_data_new) <- sub("-", "_", colnames(train_data_new))
+    colnames(train_data_new) <- sub("/", "_", colnames(train_data_new))
+    
+    name <- colnames(train_data_new)[1]
+      test <- kruskal.test(formula(paste(name ,"~diagnosis")), data = train_data_new )
+      
+      p_value <- test$p.value
+      names(p_value) <- colnames(z_scored_train_data)[x]
+    p_values_3 <- c(p_values_3, p_value)
+    
+  }
+  
+  na_removed_3 <- p_values_3[!is.na(p_values_3)]
+  adj_p_3 <- stats::p.adjust(na_removed_3, "BH")
+  sorted_3 <- sort(adj_p_3)
+  z_scored_train_data <- z_scored_train_data %>% select("SAMPLE ID", names(sorted_3), "diagnosis", "diagnosis_2")
+  selected_features_3 <- c(2,3)
+  for(i_3 in (4:length(sorted_3))-2){
+    max_3 <- 0
+    for(f_3 in selected_features_3){
+      if(sd(z_scored_train_data %>% .[[f_3]]) > 0 & sd(z_scored_train_data %>% .[[i_3]]) >0 ){
+        tmp_3 <- abs(cor(z_scored_train_data %>% .[[i_3]],z_scored_train_data %>% .[[f_3]]))
+        if(tmp_3 > max_3) max_3 <- tmp_3
+      } else {
+        max_3 <- 1
+      }
+    }
+    if(max_3 < 0.2){
+      selected_features_3 <- c(selected_features_3,i_3)
+      print(selected_features_3)
+    } 
+  }
+  
+  
+  
+  
+  selected_featureslist_3 <- colnames(z_scored_train_data)[selected_features_3]
+  
+  selected_train_data_3 <- z_scored_train_data %>% select("SAMPLE ID", "diagnosis", "diagnosis_2", selected_featureslist_3)
+
+  
+  
+  res3 <- randomForest(x = selected_train_data_3[,-c(1:3)], 
+                       y = selected_train_data_3$diagnosis)
+  
+    # For the two classes
+
+   p_values_2 <- c()
+  for (x in c(4:ncol(z_scored_train_data))){
+    print(x)
+      test <- wilcox.test(z_scored_train_data %>% dplyr::filter(diagnosis_2 == "CVID") %>% 
+                            .[[x]],
+                          z_scored_train_data %>% dplyr::filter(diagnosis_2 == "No_CVID") %>% 
+                            .[[x]])
+      p_value <- test$p.value
+      names(p_value) <- colnames(z_scored_train_data)[x]
+          p_values_2 <- c(p_values_2, p_value)
+    
+  }
+  
+  
+ na_removed_2 <- p_values_2[!is.na(p_values_2)]
+  adj_p_2 <- stats::p.adjust(na_removed_2, "BH")
+  sorted_2 <- sort(adj_p_2)
+  z_scored_train_data %>% select("SAMPLE ID", names(sorted_2), "diagnosis", "diagnosis_2")
+  selected_features_2 <- c(2,3)
+  for(i_2 in (4:length(sorted_2))-2){
+    max_2 <- 0
+    for(f_2 in selected_features_2){
+      if(sd(z_scored_train_data %>% .[[f_2]]) > 0 & sd(z_scored_train_data %>% .[[i_2]]) >0 ){
+        tmp_2 <- abs(cor(z_scored_train_data %>% .[[i_2]],z_scored_train_data %>% .[[f_2]]))
+        if(tmp_2 > max_2) max_2 <- tmp_2
+      } else {
+        max_2 <- 1
+      }
+    }
+    if(max_2 < 0.2){
+      selected_features_2 <- c(selected_features_2,i_2)
+      print(selected_features_2)
+    } 
+  }
+  
+   selected_featureslist_2 <- colnames(z_scored_train_data)[selected_features_2]
+  
+  selected_train_data_2 <- z_scored_train_data %>% select("SAMPLE ID", "diagnosis", "diagnosis_2", selected_featureslist_2)
+ 
+  
+  res2 <- randomForest(x = selected_train_data_2[,-c(1:3)], 
+                       y = as.factor(selected_train_data_2$diagnosis_2))
+  
+  
+    feat_imp_df_2 <- importance(res2) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+    
+    # plot dataframe
+    p_2 <- ggplot(feat_imp_df_2, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (2 classes), FlowSOM features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+    feat_imp_df_3 <- importance(res3) %>% 
+      data.frame() %>% 
+      mutate(feature = sub("_POSITIVE.*","",row.names(.))) %>% 
+      top_n(20, MeanDecreaseGini)
+    
+    # plot dataframe
+    p_3 <- ggplot(feat_imp_df_3, aes(x = reorder(feature, MeanDecreaseGini), 
+                            y = MeanDecreaseGini)) +
+      geom_bar(stat='identity') +
+      coord_flip() +
+      theme_classic() +
+      labs(
+        x     = "Feature",
+        y     = "Importance",
+        title = paste0(FS, ": Feature Importance (3 classes), FlowSOM features (MeanDecreaseGini)")) + 
+          theme(plot.title = element_text( size = 8) )
+    
+    plot(p_2)
+    plot(p_3)
+  
+
+          ggsave(
+  paste0(matrices_directory,"/WithFS_2classes_",to_use_data,"_tube",tube, ".png"),
+  plot = p_2,
+  width = 10,
+  height = 10,
+  dpi = 300)
+  
+        ggsave(
+  paste0(matrices_directory,"/WithFS_3classes_",to_use_data,"_tube",tube, ".png"),
+  plot = p_3,
+  width = 10,
+  height = 10,
+  dpi = 300)
+        
+        
+saveRDS(selected_featureslist_2, file = paste0(matrices_directory,"/WithFS_selected_features_res2_tube",tube, ".rds")) 
+saveRDS(selected_featureslist_3, file = paste0(matrices_directory,"/WithFS_selected_features_res3_tube",tube, ".rds"))
+
+saveRDS(res2, file = paste0(matrices_directory,"/WithFS_res2_",to_use_data,"_tube",tube,".rds")) 
+saveRDS(res3, file = paste0(matrices_directory,"/WithFS_res3",to_use_data,"_tube",tube,".rds"))
+
+}
+}
+  
+
+```
+
+
+```{r}
+FS <- "WithFS"
+
+tube <- "1"
+
+for (tube in c(1,2, 5, "1_2_5")){
+
+set.seed(seed)
+
+source("R_Scripts/Z_score.R")
+
+  set.seed(1)
+  
+  
+  all <- c("meta_clusters", "clusters", "percentages_clusters", "percentages_metaclusters","total", "percentages_to")
+to_use_data <- all[5]
+
+
+
+matrices_directory <- paste0("FlowSOM/Tube", tube, "/Data", PID) 
+
+for (to_use_data in all){
+
+  set.seed(1)
+ train_data <- choose_correct_data(to_use_data, matrices_directory)
+   dimension <- train_data %>% colnames %>% length
+ 
+    
+    train <- suppressWarnings(UseZScore(to_be_scored = train_data, 
+                                        cols_not_to_convert = c(1,dimension -1, dimension), 
+                                        meta_data = meta_data, 
+                                        verbose = TRUE,
+                                        start = 2,
+                                        stop = dimension-2))
+   
+      z_scored_train_data <- train$z_score_matrix
+  
+  selected_featureslist_2 <- readRDS(file = paste0(matrices_directory,"/WithFS_selected_features_res2_tube",tube, ".rds") )    
+  selected_featureslist_3 <- readRDS(file = paste0(matrices_directory,"/WithFS_selected_features_res3_tube",tube, ".rds") )    
+      
+  selected_featurenames_2 <- selected_featureslist_2[[(experiment-12)]]
+  selected_featurenames_3 <- selected_featureslist_3[[(experiment-12)]]
+  selected_train_data_2 <- z_scored_train_data %>% select( "Diagnosis_2", "Diagnosis",  "SAMPLE ID", selected_featurenames_2)
+  
+  selected_train_data_3 <- z_scored_train_data %>% select("Diagnosis_2", "Diagnosis",  "SAMPLE ID", selected_featurenames_3)
+
+  
+  
+  # For the three variables
+  res3 <- svm(Diagnosis ~ ., data = selected_train_data_3[,-c(1,3,4)], kernel = "linear", cost =1, scale = TRUE)
+
+  # For the two variables
+  res2 <- svm(Diagnosis_2 ~ ., data = selected_train_data_2[,-c(2,3,4)], kernel = "linear", cost =1, scale = TRUE)
+  
+  saveRDS(res2, file = paste0(matrices_directory,"/WithFS_res2_SVM_",to_use_data,"_tube",tube,".rds")) 
+  saveRDS(res3, file = paste0(matrices_directory,"/WithFS_res3_SVM",to_use_data,"_tube",tube,".rds"))
+
+}
+}
+
+
+```
+
+
+# Make the boxplots for top 3 features of RF
+# The names of the features were changed due to the SVM model creation. This is why a number of sub expressions were needed 
+```{r}
+library(reshape2)
+
+res3 <- readRDS(file = paste0("FlowSOM/Tube", tube, "/Data_PID_New_preprocessing/WithFS_res3total_tube", tube, ".rds"))
+top3_features <- res3$importance[order(res3$importance[,1], decreasing = T),][c(1:3)]
+resultslist_3 <- top3_features
+
+top3_features <- sub("X.", "",names(resultslist_3))
+top3_features <- sub("c\\.", "c",top3_features)
+top3_features <- sub("FSC\\.A", "FSC-A",top3_features)
+top3_features <- sub("iNKT\\.CD34", "iNKT/CD34",top3_features)
+top3_features <- sub("HLA\\.DR", "HLA-DR",top3_features)
+
+
+matrices_directory <- paste0("FlowSOM/Tube", tube, "/Data", PID) 
+all_data <- choose_correct_data("total", matrices_directory)
+   dimension <- all_data %>% colnames %>% length
+    
+    train <- suppressWarnings(UseZScore(to_be_scored = all_data, 
+                                        cols_not_to_convert = c(1,dimension -1, dimension), 
+                                        meta_data = meta_data, 
+                                        verbose = TRUE,
+                                        start = 2,
+                                        stop = dimension-2))
+   
+      z_scored_train_data <- train$z_score_matrix
+
+selected_features <- z_scored_train_data %>% select("SAMPLE ID", "diagnosis", top3_features)
+selected_features$diagnosis <- selected_features$diagnosis %>% as.character 
+selected_features$diagnosis[which(selected_features$diagnosis == "PAD")] <- "Other PAD"
+selected_features$diagnosis <- selected_features$diagnosis %>% factor(., levels = c("HC", "Other PAD", "CVID"))
+
+
+colnames(selected_features)[c(3:5)] <- sub("_c_to_mc","",colnames(selected_features)[c(3:5)])
+
+colnames(selected_features)[c(3:5)] <- sub("_c","",colnames(selected_features)[c(3:5)])
+colnames(selected_features)[c(3:5)] <- sub("_m","",colnames(selected_features)[c(3:5)])
+
+colnames(selected_features)[c(3:5)] <- sub("(^.*)_(.*)_([0-9]*)", "\\1_\\3_\\2", colnames(selected_features[c(3:5)]))
+colnames(selected_features)[c(3:5)] <- sub("^ctomc_","Cluster_to_Metacluster_",colnames(selected_features)[c(3:5)])
+
+colnames(selected_features)[c(3:5)] <- sub("^c_","Cluster_",colnames(selected_features)[c(3:5)])
+colnames(selected_features)[c(3:5)] <- sub("^mc_","Metacluster_",colnames(selected_features)[c(3:5)])
+
+
+## Names were added after features were inspected based on markerexpression on FlowSOM tree
+if (tube == 2){
+colnames(selected_features)[c(3:5)] <- paste(colnames(selected_features)[c(3:5)], c("_pct (sw memory B cells)", "_pct (sw memory B cells)", "_MFI (sw memory B cells)"), sep = "")} else if (tube == 1){ colnames(selected_features)[c(3:5)] <- paste(colnames(selected_features)[c(3:5)], c( "_pct (NK cells)", "_pct (NK cells)", "_MFI (CD4+ T cells)"), sep = "")} else if(tube ==5){colnames(selected_features)[c(3:5)] <- paste(colnames(selected_features)[c(3:5)], c("_pct \n (CD8+CD45RO+CCR7− T cells)", "_MFI (Regulatory T cells)", "_pct \n (CD31+RO−CD8+ T cells)"), sep = "")}
+
+
+selected_features.long <- melt(selected_features, measure = colnames(selected_features)[c(3:5)] )
+
+p <- ggplot(selected_features.long, aes(x=diagnosis, y= value)) + 
+  geom_boxplot() + geom_jitter(height = 0, aes(color = diagnosis))+ geom_violin() + 
+  scale_colour_manual(values=c("#00BA38","#619CFF","#F8766D"), breaks = c("HC", "Other PAD", "CVID"))+ 
+  facet_wrap(~ variable, scales = "free") + theme_bw() +theme(axis.title.x = element_blank(), legend.position = "none") 
+
+plot(p)
+
+
+ggsave(paste0("FlowSOM/BoxplotsFS_tube", tube, ".png"), width = 9, height = 3, dpi = 300)
+
+
+```
+
+
+
+# Make tsne plots
+```{r}
+
+set.seed(seed)
+
+library(Rtsne)
+source("R_Scripts/Z_score.R")
+library(gridExtra)
+
+meta_data_file <- "../../PhD/CVID/Clinical_features_data.txt"
+meta_data <- read.delim(meta_data_file, header = TRUE, sep = "\t", 
+                        check.names = FALSE) %>% 
+  dplyr::filter(diagnosis_group %in% group_to_use) %>%
+  dplyr::filter(SAMPLE_ID != "PIDHC081")
+
+if(length(group_to_use) == length(PID_HC)){
+  meta_data$diagnosis_group <- as.character(meta_data$diagnosis_group)
+  meta_data[!(meta_data$diagnosis_group %in% HC_CVID),"diagnosis_group"] <- "PAD"
+  meta_data$diagnosis_group <- as.factor(meta_data$diagnosis_group)
+}
+
+# PIDHC081 is removed because he has too few cells for tube 2
+rownames(meta_data) <- meta_data$SAMPLE_ID
+meta_data <- meta_data %>% mutate("diagnosis_group_2" = ifelse(meta_data$diagnosis_group == "CVID", "CVID", "No_CVID") )
+
+annotation <- meta_data
+
+matrices_directory <- paste0("FlowSOM/Tube", tube, "/Data", PID) 
+combined_data <- choose_correct_data("total", matrices_directory)
+
+
+cols_not_to_convert <- c(1, 4140, 4141)
+  
+  z_scored_train_data_full <- suppressWarnings(UseZScore(to_be_scored = combined_data, 
+                                                         cols_not_to_convert,
+                                                         meta_data, 
+                                                         verbose = FALSE, 
+                                                         start = 2, 
+                                                         stop = ncol(combined_data) - 2))
+  z_scored_train_data <- z_scored_train_data_full$z_score_matrix
+  
+  
+  # Features obtained from boxplots generated in previous section
+z_scored_train_data <- z_scored_train_data %>% select("SAMPLE ID", "diagnosis", "diagnosis_2", "Tube1_ctomc_27_c_to_mc", "Tube1_c_27_c", "Tube1_c_CD14_94_c", "Tube2_c_CD27_50_c",  "Tube2_c_CD27_29_c", "Tube2_c_94_c", "Tube5_c_89_c", "Tube5_c_2_c", "Tube5_c_FoxP3_68_c")
+  
+  
+  set.seed(1)
+tsne_res <- Rtsne(z_scored_train_data[,-c(1:3)], perplexity = 15)
+
+annotation <- annotation %>% 
+  mutate(tsne_1 = tsne_res$Y[,1]) %>% 
+  mutate(tsne_2 = tsne_res$Y[,2])
+
+p <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(size = 5) +
+  theme_minimal() + 
+  ggtitle("A. TSNE based on FlowSOM features")
+
+p_gender <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = gender), size = 5) + guides(colour = guide_legend( title = "Gender")) +
+  theme_minimal() + 
+  ggtitle("B.")
+
+  
+p_diagnosis <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = diagnosis_group), size = 5) +  guides(colour = guide_legend( title = "Diagnosis")) +
+  theme_minimal() + 
+  ggtitle("C.")
+
+
+p_age <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = as.numeric(gsub(",", ".", gsub("\\.", "", age_y)))), size = 5) +guides(color=guide_legend(title="Age"))
+p_age <- p_age +  theme_minimal()  +
+  ggtitle("D.")
+l <- list(p,p_gender, p_diagnosis, p_age)
+
+ggsave("FlowSOM/tsne_new2.png", arrangeGrob(grobs = l), width = 10, height = 10, dpi = 300)
+
+plot(p_age)
+
+
+p_diagnosis
+
+p_diagnosis <- annotation %>% 
+  ggplot(aes(x = tsne_1, y = tsne_2)) + 
+  geom_point(aes(color = diagnosis_group), size = 5) +  guides(colour = guide_legend( title = "Diagnosis")) +
+  theme_minimal() + geom_text(aes(label=SAMPLE_ID),hjust=0, vjust=0)
+
+
+p_diagnosis
+
+
+
+```
