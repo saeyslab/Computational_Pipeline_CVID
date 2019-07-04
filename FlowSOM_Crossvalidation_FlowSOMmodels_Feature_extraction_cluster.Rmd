@@ -1,0 +1,423 @@
+---
+title: "FlowSOM_PRISM"
+output: html_document
+---
+
+
+## Set working directory for entire Rmd
+```{r setup}
+knitr::opts_knit$set(root.dir = "../")
+```
+
+# Load in packages
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+
+suppressPackageStartupMessages(library(flowCore))
+suppressPackageStartupMessages(library(flowWorkspace))
+suppressPackageStartupMessages(library(FlowSOM))
+suppressPackageStartupMessages(library(MEM))
+suppressPackageStartupMessages(library(qsub))
+
+seed <- 1
+
+```
+
+## On what tube will you be working on? 
+
+```{r}
+tube <- 5
+
+if (tube == 1){ #PBMCs
+  markers_to_cluster_idc <- c(1,4,7:16,18)
+} else if (tube == 2) { # B cells
+  markers_to_cluster_idc <- c(7:13,16,18)
+}  else if (tube == 5) { # T cells
+  markers_to_cluster_idc <- c(7:13,16,18)
+}
+```
+
+
+## Do you include the other PID?
+```{r}
+HC_CVID <- c("HC", "CVID")
+PID_HC <- c(HC_CVID, "IgG_deficiency", "IgG_subclass_deficiency", "IgM_deficiency",
+            "IgA_deficiency")
+
+# Use this one if you want to map all the files including the HFM on the trees as well
+PID_HC <- c(HC_CVID, "IgG_deficiency", "IgG_subclass_deficiency", "IgM_deficiency",
+            "IgA_deficiency", "HFM")
+
+
+group_to_use <- PID_HC  # Choose between HC_CVID and PID_HC
+PID <- "_PID_New_preprocessing" #Set to empty character if you are only working with HC en CVID (otherwise: _PID)
+
+seed <- 1
+```
+
+
+## List correct direcories
+```{r}
+data_dir = paste0("FlowSOM/Tube",tube,"/Data",PID,"/Crossvalidation")
+fcs_dir = paste0("Preprocessing/Tube",tube)
+figure_dir <- paste0("FlowSOM/Tube",tube,"/Figures", PID, "/Crossvalidation")
+aggregate_dir <- file.path(data_dir, "Aggregates")
+fsom_dir <- file.path(data_dir, "fsom_trees")
+fsom_objects <- file.path(data_dir, "fsom_objects")
+
+```
+
+
+# Make directories if they don't exist yet
+```{r}
+suppressWarnings(dir.create(data_dir))
+suppressWarnings(dir.create(figure_dir))
+suppressWarnings(dir.create(fsom_dir))
+suppressWarnings(dir.create(aggregate_dir))
+suppressWarnings(dir.create(fsom_objects))
+```
+
+
+# FlowSOM analysis Human blood samples CVID run on the cluster
+
+## Overview of the meta_data
+
+```{r}
+meta_data_file <- "../../PhD/CVID/Clinical_features_data.txt"
+meta_data <- read.delim(meta_data_file, header = TRUE, sep = "\t", 
+                        check.names = FALSE) %>% 
+  dplyr::filter(diagnosis_group %in% group_to_use) %>%
+  dplyr::filter(SAMPLE_ID != "PIDHC081")
+
+if(length(group_to_use) == length(PID_HC)){
+  meta_data$diagnosis_group <- as.character(meta_data$diagnosis_group)
+  meta_data[!(meta_data$diagnosis_group %in% c(HC_CVID, "HFM")),"diagnosis_group"] <- "PID"
+  meta_data$diagnosis_group <- as.factor(meta_data$diagnosis_group)
+}
+
+# PIDHC081 is removed because he has too few cells for tube 2
+rownames(meta_data) <- meta_data$SAMPLE_ID
+
+meta_data
+```
+
+
+# Set up qsub config 
+```{r}
+qsub_config = create_qsub_config(
+  remote = "",
+  local_tmp_path = "C:/Users//Documents/.r2gridengine",
+  remote_tmp_path = "/scratch/irc/personal//r2gridengine",
+  modules = "R/x86_64/3.5.1",
+  memory = "4G",
+  wait = TRUE, 
+  remove_tmp_folder = TRUE,
+  name = "FlowSOM_exp13",
+  max_wall_time = "500:00:00",
+  stop_on_error = TRUE
+)
+qsub::set_default_qsub_config(qsub_config, permanent = T)
+
+```
+
+## List files and select only HC and CVID files and/or other PID files
+
+```{r}
+allfiles <- list.files(fcs_dir, pattern = "^P.*_pp.fcs$", recursive = TRUE)
+files <- allfiles[grep(paste(rownames(meta_data), collapse="|"), allfiles)]
+```
+
+# Make FlowSOM model per experiment day --> save in RDS object
+
+
+```{r}
+if(tube == 1){
+  nclus <- 10
+  nmetaclus <- 14
+} else if(tube == 2){
+  nclus <- 10
+  nmetaclus <- 18
+}else if(tube == 5){
+  nclus <- 10
+  nmetaclus <- 18
+} 
+```
+
+
+
+## Select correct files for the experiment day + make variables for patients #DONE!!!
+```{r}
+
+experiment_day <- 22
+
+pdf(file = file.path(figure_dir,"fsom_stars_metaclusters.pdf"))
+
+for (experiment_day in c(13:33)){
+  
+  print(paste0("Experiment day ",experiment_day))
+  
+  train_files <- files[-grep(paste0("Exp_",experiment_day), files)]
+  train_files
+  
+  set.seed(seed)
+  ## Make aggregate file for selected files
+  suppressWarnings(ff_agg <- AggregateFlowFrames(file.path(fcs_dir,train_files), 
+                                cTotal = 3000000,
+                                writeOutput  = TRUE,
+                                outputFile = file.path(aggregate_dir,
+                                                       paste0("Without_Experiment_day_",
+                                                              experiment_day, 
+                                                              "_aggregate",
+                                                              seed,".fcs"))))
+  #table(ff_agg@exprs[,"File"])
+  ff_agg <- read.FCS(file = file.path(aggregate_dir, paste0("Without_Experiment_day_",
+                                                           experiment_day,
+                                                           "_aggregate", seed, ".fcs")))
+  
+  ff_agg <- ff_agg[,-c(20,21)]
+  
+  markers_to_cluster <-  colnames(ff_agg)[markers_to_cluster_idc]
+  
+  
+  ## Make fsom model
+  fsom <- FlowSOM(ff_agg,
+                  colsToUse = markers_to_cluster_idc,
+                  xdim = nclus, ydim = nclus,
+                  nClus = nmetaclus,
+                  seed = seed)
+  
+  saveRDS(fsom, file = file.path(fsom_dir, 
+                                 paste0("fsom_without_experiment_day_", 
+                                        experiment_day, ".Rds")))
+  #fsom <- readRDS(paste0("FlowSOM/Tube1/Data/Crossvalidation/fsom_trees/fsom_without_experiment_day_",experiment_day,".Rds"))
+  PlotStars(UpdateNodeSize(fsom$FlowSOM,maxNodeSize = 10, reset = TRUE),
+            backgroundValues = fsom$metaclustering, main = paste0("Experiment ", experiment_day, " was left out."))
+  PlotNumbers(UpdateNodeSize(fsom$FlowSOM,reset=TRUE))
+  PlotLabels(UpdateNodeSize(fsom$FlowSOM, maxNodeSize = 10, reset = TRUE), labels = fsom$metaclustering)
+  
+}
+
+
+dev.off()
+
+
+```
+
+
+
+# Script for cross-validation on the cluster --> save all matrices in Rdata object
+# Extraction of FlowSOM features per crossvaldation FlowSOM tree 
+```{r}
+
+experiment_day <- 13
+
+
+  train_files <- files ## Make sure that you take all the files to map!!
+  #train_files
+  #f <- lapply(file.path(fcs_dir, train_files), read.FCS)
+  fcs_dir <- paste0("/group/irc/personal/anneliese/Preprocessed_files/Tube", tube)
+for (experiment_day in c(23:33)){
+  print(paste0("Experiment day ", experiment_day))
+  
+  #Just for the entire flowSOM tree
+  #fsom <- readRDS(file =  paste0("FlowSOM/tube", tube, "/Data", PID, "/FlowSOM", PID, "_",nclus,"_",nmetaclus,"_",seed,".RDS"))
+  
+  fsom <- readRDS(file = paste0(fsom_dir,"/fsom_without_experiment_day_",
+                                experiment_day,
+                                ".Rds"))
+
+  handle <- qsub_lapply(
+    X = seq_len(length(train_files)),
+    qsub_config = override_qsub_config(name = "FlowSOM_Cross_Validation", wait = FALSE, memory = "5G"),
+    qsub_environment = c("fsom", "markers_to_cluster_idc", "nclus", "nmetaclus", "fcs_dir", "experiment_day", "train_files"),
+    FUN = function(x) {  
+            library(dplyr)
+            library(flowCore)
+      f <- read.FCS(file.path(fcs_dir,train_files[x]))
+
+      counts_t <- matrix(0, 
+                     nrow = 1, 
+                     ncol = nclus*nclus, 
+                     dimnames = list("", 
+                                     as.character(seq_len(nclus*nclus)))) 
+    meta_clusters_t <- matrix(0, 
+                              nrow = 1, 
+                              ncol = nmetaclus, 
+                              dimnames = list("", 
+                                              as.character(seq_len(nmetaclus)))) 
+  
+    
+    fsom_tmp <- FlowSOM::NewData(fsom$FlowSOM,f)
+    cells_clusters <- FlowSOM::GetClusters(fsom_tmp) %>% table()
+    counts_t[,names(cells_clusters)] <- cells_clusters
+    cells_metaclusters <- fsom$metaclustering[fsom_tmp$map$mapping[,1]] %>% table()
+    meta_clusters_t[,names(cells_metaclusters)] <- cells_metaclusters
+    MFI_matrices_clusters <-  matrix(0,
+                   nrow = dim(counts_t)[2],
+                   ncol = length(markers_to_cluster_idc),
+                   dimnames = list(as.character(seq_len(dim(counts_t)[2])), 
+                                   names(fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])))
+    for (colour in colnames(MFI_matrices_clusters)){
+      print(colour)
+      MFI_matrices_clusters[, colour] <- 
+        sapply(rownames(MFI_matrices_clusters), function(i) 
+      median(f@exprs[FlowSOM::GetClusters(fsom_tmp) == i,colour]))
+    }
+    
+    MFI_matrices_clusters[is.na(MFI_matrices_clusters)] <- 0    
+    MFI_matrices_metaclusters <-  matrix(0,
+                   nrow = dim(meta_clusters_t)[2],
+                   ncol = length(markers_to_cluster_idc),
+                   dimnames = list(as.character(seq_len(dim(meta_clusters_t)[2])), 
+                                   names(fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])))
+    for (colour in colnames(MFI_matrices_metaclusters)){
+      MFI_matrices_metaclusters[, colour] <- 
+        sapply(rownames(MFI_matrices_metaclusters), function(i) 
+      median(f@exprs[fsom$metaclustering[fsom_tmp$map$mapping[,1]] == i,colour]))
+    }
+    MFI_matrices_metaclusters[is.na(MFI_matrices_metaclusters)] <- 0
+        
+    colnames(MFI_matrices_clusters) <- 
+      sub(" .*", "",fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])
+    colnames(MFI_matrices_metaclusters) <- 
+      sub(" .*", "",fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])
+    
+    percentages_cluster_to_meta_cluster <- 
+      sapply(seq_len(dim(counts_t)[2]), 
+             function(x)counts_t[x]/sum(counts_t[which(fsom$metaclustering == fsom$metaclustering[x])]))
+        
+    percentages_clusters <- 
+      sapply(seq_len(dim(counts_t)[2]), 
+             function(x)counts_t[x]/sum(counts_t))
+        
+    percentages_metaclusters <- 
+      sapply(seq_len(dim(meta_clusters_t)[2]), 
+             function(x)meta_clusters_t[x]/sum(meta_clusters_t))
+        
+    result <- list("Patient"= f@description$`$SRC`,
+                   "counts_clusters" = counts_t, 
+                   "counts_meta_clusters" = meta_clusters_t, 
+                   "MFI_clusters" = MFI_matrices_clusters, 
+                   "MFI_metaclusters" = MFI_matrices_metaclusters, 
+                   "percentages_cluster2metacluster" = percentages_cluster_to_meta_cluster, 
+                   "percentages_clusters" = percentages_clusters, 
+                   "percentages_metaclusters" = percentages_metaclusters)
+        })
+  
+  #Just for the entire flowSOM tree
+  #saveRDS(handle, file = paste0("FlowSOM/tube", tube, "/Data", PID, "/fsom_objects.Rds"))
+
+  saveRDS(handle, file = paste0(fsom_objects,"/fsom_objects_experiment_day_handle_cluster",experiment_day,".Rds"))
+}
+
+```
+
+
+
+#Since we wait on the results of the cluster, here we can retrieve the results
+
+```{r}
+experiment_day <- 13
+for (experiment_day in c(23:33)){
+  experiment <- readRDS(file = paste0(fsom_objects, "/fsom_objects_experiment_day_handle_cluster", experiment_day, ".Rds"))
+  handle <- qsub_retrieve(experiment)
+  saveRDS(handle, file = paste0(fsom_objects, "/fsom_objects_experiment_day", experiment_day, ".Rds"))
+}
+```
+
+
+# Without using the cluster
+```{r}
+
+
+experiment_day <- 13
+
+for (experiment_day in c(13:33)){
+
+  
+  fsom <- readRDS(file = paste0(fsom_dir,"/fsom_without_experiment_day_",
+                                experiment_day,
+                                ".Rds"))
+  #train_files <- files[grep("PIDHC085", files)]
+  #train_files
+  file <- files[17]
+  final <- list()
+  for (file in files){
+    counts_t <- matrix(0, 
+                     nrow = 1, 
+                     ncol = nclus*nclus, 
+                     dimnames = list("", 
+                                     as.character(seq_len(nclus*nclus)))) 
+    meta_clusters_t <- matrix(0, 
+                              nrow = 1, 
+                              ncol = nmetaclus, 
+                              dimnames = list("", 
+                                              as.character(seq_len(nmetaclus)))) 
+  
+    
+    ff <- read.FCS(file.path(fcs_dir, file))
+    fsom_tmp <- FlowSOM::NewData(fsom$FlowSOM,ff)
+    cells_clusters <- FlowSOM::GetClusters(fsom_tmp) %>% table()
+    counts_t[,names(cells_clusters)] <- cells_clusters
+    cells_metaclusters <- fsom$metaclustering[fsom_tmp$map$mapping[,1]] %>% table()
+    meta_clusters_t[,names(cells_metaclusters)] <- cells_metaclusters
+    MFI_matrices_clusters <-  matrix(0,
+                   nrow = dim(counts_t)[2],
+                   ncol = length(markers_to_cluster_idc),
+                   dimnames = list(as.character(seq_len(dim(counts_t)[2])), 
+                                   names(fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])))
+    for (colour in colnames(MFI_matrices_clusters)){
+      print(colour)
+      MFI_matrices_clusters[, colour] <- 
+        sapply(rownames(MFI_matrices_clusters), function(i) 
+      median(ff@exprs[FlowSOM::GetClusters(fsom_tmp) == i,colour]))
+    }
+    
+    MFI_matrices_clusters[is.na(MFI_matrices_clusters)] <- 0    
+    MFI_matrices_metaclusters <-  matrix(0,
+                   nrow = dim(meta_clusters_t)[2],
+                   ncol = length(markers_to_cluster_idc),
+                   dimnames = list(as.character(seq_len(dim(meta_clusters_t)[2])), 
+                                   names(fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])))
+    for (colour in colnames(MFI_matrices_metaclusters)){
+      MFI_matrices_metaclusters[, colour] <- 
+        sapply(rownames(MFI_matrices_metaclusters), function(i) 
+      median(ff@exprs[fsom$metaclustering[fsom_tmp$map$mapping[,1]] == i,colour]))
+    }
+    MFI_matrices_metaclusters[is.na(MFI_matrices_metaclusters)] <- 0
+        
+    colnames(MFI_matrices_clusters) <- 
+      sub(" .*", "",fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])
+    colnames(MFI_matrices_metaclusters) <- 
+      sub(" .*", "",fsom$FlowSOM$prettyColnames[markers_to_cluster_idc])
+    
+    percentages_cluster_to_meta_cluster <- 
+      sapply(seq_len(dim(counts_t)[2]), 
+             function(x)counts_t[x]/sum(counts_t[which(fsom$metaclustering == fsom$metaclustering[x])]))
+        
+    percentages_clusters <- 
+      sapply(seq_len(dim(counts_t)[2]), 
+             function(x)counts_t[x]/sum(counts_t))
+        
+    percentages_metaclusters <- 
+      sapply(seq_len(dim(meta_clusters_t)[2]), 
+             function(x)meta_clusters_t[x]/sum(meta_clusters_t))
+        
+    result <- list("Patient"= ff@description$`$SRC`,
+                   "counts_clusters" = counts_t, 
+                   "counts_meta_clusters" = meta_clusters_t, 
+                   "MFI_clusters" = MFI_matrices_clusters, 
+                   "MFI_metaclusters" = MFI_matrices_metaclusters, 
+                   "percentages_cluster2metacluster" = percentages_cluster_to_meta_cluster, 
+                   "percentages_clusters" = percentages_clusters, 
+                   "percentages_metaclusters" = percentages_metaclusters)
+    
+    final[[ff@description$`$SRC`]] <- result
+      }
+      
+  saveRDS(final, file = paste0(fsom_objects,"/fsom_objects_experiment_day",experiment_day,".Rds"))
+}
+
+
+```
+
